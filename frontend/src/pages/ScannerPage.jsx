@@ -1,15 +1,15 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { ShieldCheck, X } from 'lucide-react';
+import { ShieldCheck } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
 import ProductResult from '../components/ProductResult';
 
 const ScannerPage = () => {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [manualBarcode, setManualBarcode] = useState('');
   const lastScan = useRef('');
+  const resultRef = useRef(null);
   const navigate = useNavigate();
 
   const lookupBarcode = useCallback(async (barcode) => {
@@ -28,20 +28,9 @@ const ScannerPage = () => {
   }, []);
 
   useEffect(() => {
-    const barcode = manualBarcode.trim();
-    if (!barcode) return;
-    const timer = setTimeout(() => {
-      lastScan.current = '';
-      lookupBarcode(barcode);
-    }, 2000);
-    return () => clearTimeout(timer);
-  }, [manualBarcode, lookupBarcode]);
-
-  const clearResult = () => {
-    setResult(null);
-    lastScan.current = '';
-    setManualBarcode('');
-  };
+    if (!loading && !result) return;
+    resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [loading, result]);
 
   return (
     <div className="app-wrapper">
@@ -66,28 +55,11 @@ const ScannerPage = () => {
         <div className="section-label">Live Scanner</div>
         <BarcodeScanner onScan={lookupBarcode} active={true} />
 
-        <div className="divider" />
-
-        <div className="section-label">Manual Entry</div>
-        <form onSubmit={(e) => e.preventDefault()} className="manual-input-group">
-          <input
-            type="text"
-            className="input"
-            placeholder="Enter barcode (auto search in 2s)..."
-            value={manualBarcode}
-            onChange={e => setManualBarcode(e.target.value)}
-          />
-        </form>
-
         {(result || loading) && (
-          <>
+          <div ref={resultRef}>
             <div className="divider" />
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-              <div className="section-label" style={{ margin: 0 }}>Result</div>
-              {result && <button className="btn btn-ghost btn-sm btn-icon" onClick={clearResult}><X size={14} /></button>}
-            </div>
             <ProductResult result={result} loading={loading} showCost={false} />
-          </>
+          </div>
         )}
       </div>
     </div>

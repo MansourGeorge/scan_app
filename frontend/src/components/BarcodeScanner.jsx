@@ -28,6 +28,7 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   const [detectedCode, setDetectedCode] = useState('');
   const [isInAppBrowser, setIsInAppBrowser] = useState(false);
   const detectionResetTimerRef = useRef(null);
+  const isIOSRef = useRef(false);
 
   const buildReader = () => {
     const hints = new Map();
@@ -93,6 +94,8 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     }
   };
 
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
   const normalizeCameraZoom = () => {
     try {
       const stream = videoRef.current?.srcObject;
@@ -103,8 +106,18 @@ const BarcodeScanner = ({ onScan, active = true }) => {
       const advanced = [];
 
       if (caps.zoom && typeof caps.zoom.min === 'number') {
-        // Force the lowest available zoom to avoid unwanted "zoomed" preview on some phones.
-        const targetZoom = caps.zoom.min > 1 ? caps.zoom.min : 1;
+        const min = caps.zoom.min;
+        const max = caps.zoom.max;
+        let targetZoom;
+
+        if (isIOSRef.current) {
+          // iOS can pick ultra-wide lens by default; nudging zoom near 2x often switches to the
+          // main wide camera and improves barcode readability/focus.
+          targetZoom = max >= 2 ? 2 : (max >= 1 ? 1 : min);
+        } else {
+          targetZoom = clamp(1, min, max);
+        }
+
         advanced.push({ zoom: targetZoom });
       }
 
@@ -136,11 +149,6 @@ const BarcodeScanner = ({ onScan, active = true }) => {
         else if (caps.focusMode.includes('auto')) advanced.push({ focusMode: 'auto' });
       }
 
-      if (caps.focusDistance && typeof caps.focusDistance.min === 'number' && typeof caps.focusDistance.max === 'number') {
-        const target = (caps.focusDistance.min + caps.focusDistance.max) / 2;
-        advanced.push({ focusDistance: target });
-      }
-
       if (advanced.length) {
         await track.applyConstraints({ advanced });
       }
@@ -149,18 +157,20 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     }
   };
 
-  const getVideoConstraints = (deviceId) => ({
-    video: {
+  const getVideoConstraints = (deviceId) => {
+    const video = {
       ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-      frameRate: { ideal: 24, max: 30 },
-      advanced: [
-        { focusMode: 'continuous' }
-      ]
-    },
-    audio: false
-  });
+      width: { ideal: isIOSRef.current ? 1920 : 1280 },
+      height: { ideal: isIOSRef.current ? 1080 : 720 },
+      frameRate: { ideal: 24, max: 30 }
+    };
+
+    if (!isIOSRef.current) {
+      video.advanced = [{ focusMode: 'continuous' }];
+    }
+
+    return { video, audio: false };
+  };
 
   const startRefocusLoop = () => {
     if (refocusIntervalRef.current) clearInterval(refocusIntervalRef.current);
@@ -310,6 +320,11 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   useEffect(() => {
     const ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '') || '';
     setIsInAppBrowser(/WhatsApp|FBAN|FBAV|Instagram/i.test(ua));
+    isIOSRef.current = /iPad|iPhone|iPod/.test(ua) || (
+      typeof navigator !== 'undefined' &&
+      navigator.platform === 'MacIntel' &&
+      navigator.maxTouchPoints > 1
+    );
   }, []);
 
   useEffect(() => {
