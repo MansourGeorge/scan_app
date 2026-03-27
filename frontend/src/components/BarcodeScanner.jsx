@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BrowserMultiFormatReader, NotFoundException } from '@zxing/library';
+import { BrowserMultiFormatReader, NotFoundException, BarcodeFormat, DecodeHintType } from '@zxing/library';
 import { Camera, CameraOff, RefreshCw } from 'lucide-react';
 
 const BarcodeScanner = ({ onScan, active = true }) => {
@@ -8,24 +8,80 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   const [error, setError] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState([]);
-  const [deviceIdx, setDeviceIdx] = useState(0);
+  const [deviceIdx, setDeviceIdx] = useState(-1);
+
+  const buildReader = () => {
+    const hints = new Map();
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.ITF,
+      BarcodeFormat.CODABAR
+    ]);
+    const reader = new BrowserMultiFormatReader(hints, 300);
+    reader.timeBetweenDecodingAttempts = 80;
+    return reader;
+  };
+
+  const getPreferredDeviceIndex = (devList) => {
+    if (!devList?.length) return -1;
+    const preferred = devList.findIndex((d) => /back|rear|environment/i.test(d.label || ''));
+    return preferred >= 0 ? preferred : -1;
+  };
+
+  const normalizeCameraZoom = () => {
+    try {
+      const stream = videoRef.current?.srcObject;
+      const track = stream?.getVideoTracks?.()[0];
+      if (!track || typeof track.getCapabilities !== 'function') return;
+
+      const caps = track.getCapabilities();
+      const advanced = [];
+
+      if (caps.zoom && typeof caps.zoom.min === 'number') {
+        // Force the lowest available zoom to avoid unwanted "zoomed" preview on some phones.
+        const targetZoom = caps.zoom.min > 1 ? caps.zoom.min : 1;
+        advanced.push({ zoom: targetZoom });
+      }
+
+      if (Array.isArray(caps.focusMode)) {
+        if (caps.focusMode.includes('continuous')) advanced.push({ focusMode: 'continuous' });
+        else if (caps.focusMode.includes('auto')) advanced.push({ focusMode: 'auto' });
+      }
+
+      if (advanced.length && typeof track.applyConstraints === 'function') {
+        track.applyConstraints({ advanced }).catch(() => {});
+      }
+    } catch {
+      // Ignore browser/device-specific camera capability errors.
+    }
+  };
 
   const startScanner = async (devList, idx) => {
     if (!videoRef.current) return;
     try {
-      const reader = new BrowserMultiFormatReader();
+      const reader = buildReader();
       readerRef.current = reader;
-      const deviceId = devList?.[idx]?.deviceId || undefined;
+      const chosenDevice = idx >= 0 ? devList?.[idx] : null;
+      const deviceId = chosenDevice?.deviceId || null;
       setScanning(true);
       setError(null);
-      await reader.decodeFromVideoDevice(deviceId, videoRef.current, (result, err) => {
+      const decodePromise = reader.decodeFromVideoDevice(deviceId, videoRef.current, (result, err) => {
         if (result) {
-          onScan(result.getText());
+          onScan(result.getText()?.trim());
         }
         if (err && !(err instanceof NotFoundException)) {
-          // ignore not found, it's expected while scanning
+          // Ignore continuous decode noise errors. NotFound is expected.
         }
       });
+      setTimeout(normalizeCameraZoom, 350);
+      setTimeout(normalizeCameraZoom, 1200);
+      await decodePromise;
     } catch (e) {
       setError(e.message || 'Camera access denied');
       setScanning(false);
@@ -34,6 +90,11 @@ const BarcodeScanner = ({ onScan, active = true }) => {
 
   const stopScanner = () => {
     readerRef.current?.reset();
+    if (videoRef.current?.srcObject) {
+      const stream = videoRef.current.srcObject;
+      stream.getTracks().forEach((track) => track.stop());
+      videoRef.current.srcObject = null;
+    }
     setScanning(false);
   };
 
@@ -41,18 +102,24 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     if (!active) { stopScanner(); return; }
 
     let cancelled = false;
-    const deviceReader = new BrowserMultiFormatReader();
+    const deviceReader = buildReader();
 
     const initScanner = async () => {
       try {
         const devs = await deviceReader.listVideoInputDevices();
         if (cancelled) return;
         setDevices(devs);
-        await startScanner(devs, deviceIdx);
+        const preferredIdx = getPreferredDeviceIndex(devs);
+        setDeviceIdx(preferredIdx);
+        await startScanner(devs, preferredIdx);
       } catch {
         if (cancelled) return;
-        setDevices([]);
-        await startScanner([], 0);
+        // Fallback to generic camera request.
+        try {
+          await startScanner([], -1);
+        } catch (err) {
+          setError(err?.message || 'Camera access denied');
+        }
       }
     };
 
@@ -65,10 +132,12 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   }, [active]);
 
   const switchCamera = () => {
-    const next = (deviceIdx + 1) % devices.length;
+    if (!devices.length) return;
+    const current = deviceIdx >= 0 ? deviceIdx : 0;
+    const next = (current + 1) % devices.length;
     setDeviceIdx(next);
     stopScanner();
-    setTimeout(() => startScanner(devices, next), 300);
+    setTimeout(() => startScanner(devices, next), 250);
   };
 
   return (

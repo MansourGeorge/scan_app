@@ -661,3 +661,16 @@ html, body, #root {
   .btn-lg { padding: 0.625rem 1.25rem; }
   .price-value { font-size: 1.2rem; }
 }
+
+/* Phone-specific scanner/input behavior */
+@media (max-width: 768px) {
+  .camera-wrapper video {
+    object-fit: contain;
+  }
+
+  /* Prevent browser focus-zoom on mobile inputs */
+  .input,
+  .input-full {
+    font-size: 16px;
+  }
+}

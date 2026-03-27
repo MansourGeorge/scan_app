@@ -1,8 +1,8 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import {
-  LogOut, Search, X, Upload, FileSpreadsheet,
+  LogOut, X, Upload, FileSpreadsheet,
   CheckCircle, AlertCircle, User, KeyRound, Eye, EyeOff, Lock
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -177,13 +177,15 @@ const AdminDashboard = () => {
     }
   }, [admin]);
 
-  const handleManualSearch = (e) => {
-    e.preventDefault();
-    if (manualBarcode.trim()) {
+  useEffect(() => {
+    const barcode = manualBarcode.trim();
+    if (!barcode) return;
+    const timer = setTimeout(() => {
       lastScan.current = '';
-      lookupBarcode(manualBarcode.trim());
-    }
-  };
+      lookupBarcode(barcode);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [manualBarcode, lookupBarcode]);
 
   const clearResult = () => {
     setResult(null);
@@ -253,17 +255,14 @@ const AdminDashboard = () => {
         <div className="divider" />
 
         <div className="section-label">Manual Entry</div>
-        <form onSubmit={handleManualSearch} className="manual-input-group">
+        <form onSubmit={(e) => e.preventDefault()} className="manual-input-group">
           <input
             type="text"
             className="input"
-            placeholder="Enter barcode manually..."
+            placeholder="Enter barcode (auto search in 2s)..."
             value={manualBarcode}
             onChange={e => setManualBarcode(e.target.value)}
           />
-          <button type="submit" className="btn btn-primary btn-sm">
-            <Search size={14} />
-          </button>
         </form>
 
         {(result || loading) && (
