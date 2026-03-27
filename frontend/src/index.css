@@ -683,8 +683,17 @@ html, body, #root {
 
 /* Phone-specific scanner/input behavior */
 @media (max-width: 768px) {
+  .camera-wrapper {
+    aspect-ratio: 3/4;
+    max-height: 70vh;
+  }
+
   .camera-wrapper video {
-    object-fit: contain;
+    object-fit: cover;
+  }
+
+  .scan-frame {
+    width: 78%;
   }
 
   /* Prevent browser focus-zoom on mobile inputs */
@@ -692,4 +701,22 @@ html, body, #root {
   .input-full {
     font-size: 16px;
   }
+}
+
+.camera-hint {
+  position: absolute;
+  bottom: 2.25rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: calc(100% - 1.5rem);
+  max-width: 420px;
+  background: rgba(255, 179, 0, 0.16);
+  border: 1px solid rgba(255, 179, 0, 0.45);
+  color: #ffd98a;
+  font-size: 0.7rem;
+  line-height: 1.3;
+  text-align: center;
+  padding: 0.28rem 0.5rem;
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
 }

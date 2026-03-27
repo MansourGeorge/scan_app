@@ -10,6 +10,7 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   const [devices, setDevices] = useState([]);
   const [deviceIdx, setDeviceIdx] = useState(-1);
   const [detectedCode, setDetectedCode] = useState('');
+  const [isInAppBrowser, setIsInAppBrowser] = useState(false);
   const detectionResetTimerRef = useRef(null);
 
   const buildReader = () => {
@@ -32,8 +33,16 @@ const BarcodeScanner = ({ onScan, active = true }) => {
 
   const getPreferredDeviceIndex = (devList) => {
     if (!devList?.length) return -1;
-    const preferred = devList.findIndex((d) => /back|rear|environment/i.test(d.label || ''));
-    return preferred >= 0 ? preferred : -1;
+    const labels = devList.map((d) => (d.label || '').toLowerCase());
+
+    // Prefer "main/back" camera and avoid ultra-wide/telephoto when possible.
+    let preferred = labels.findIndex((l) => /back|rear|environment/.test(l) && !/ultra|tele|zoom/.test(l));
+    if (preferred >= 0) return preferred;
+
+    preferred = labels.findIndex((l) => /back|rear|environment/.test(l));
+    if (preferred >= 0) return preferred;
+
+    return -1;
   };
 
   const markDetected = (value) => {
@@ -76,9 +85,12 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   const getVideoConstraints = (deviceId) => ({
     video: {
       ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
-      frameRate: { ideal: 30, max: 60 }
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 24, max: 30 },
+      advanced: [
+        { focusMode: 'continuous' }
+      ]
     },
     audio: false
   });
@@ -156,6 +168,11 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   };
 
   useEffect(() => {
+    const ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '') || '';
+    setIsInAppBrowser(/WhatsApp|FBAN|FBAV|Instagram/i.test(ua));
+  }, []);
+
+  useEffect(() => {
     if (!active) { stopScanner(); return; }
 
     let cancelled = false;
@@ -225,6 +242,9 @@ const BarcodeScanner = ({ onScan, active = true }) => {
             </div>
           </div>
           <div className="camera-status">Point at barcode to scan</div>
+          {isInAppBrowser && (
+            <div className="camera-hint">If camera stays blurry, open this link in Safari/Chrome</div>
+          )}
           {detectedCode && (
             <div className="camera-detected">Detected: {detectedCode}</div>
           )}
