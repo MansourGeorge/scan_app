@@ -2,10 +2,25 @@ import React, { useEffect, useRef, useState } from 'react';
 import { BrowserMultiFormatReader, NotFoundException, BarcodeFormat, DecodeHintType } from '@zxing/library';
 import { Camera, CameraOff, RefreshCw } from 'lucide-react';
 
+const NATIVE_BARCODE_FORMATS = [
+  'ean_13',
+  'ean_8',
+  'upc_a',
+  'upc_e',
+  'code_128',
+  'code_39',
+  'itf',
+  'codabar'
+];
+
 const BarcodeScanner = ({ onScan, active = true }) => {
   const videoRef = useRef(null);
   const readerRef = useRef(null);
   const refocusIntervalRef = useRef(null);
+  const nativeDetectorRef = useRef(null);
+  const nativeScanRafRef = useRef(null);
+  const nativeScanLastTsRef = useRef(0);
+  const nativeDetectBusyRef = useRef(false);
   const [error, setError] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState([]);
@@ -53,6 +68,29 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     }
     if (detectionResetTimerRef.current) clearTimeout(detectionResetTimerRef.current);
     detectionResetTimerRef.current = setTimeout(() => setDetectedCode(''), 1400);
+  };
+
+  const createNativeDetector = async () => {
+    if (typeof window === 'undefined' || !('BarcodeDetector' in window)) return null;
+    const Detector = window.BarcodeDetector;
+    let formats = [...NATIVE_BARCODE_FORMATS];
+
+    try {
+      if (typeof Detector.getSupportedFormats === 'function') {
+        const supported = await Detector.getSupportedFormats();
+        formats = NATIVE_BARCODE_FORMATS.filter((f) => supported.includes(f));
+      }
+    } catch {
+      // Ignore capability read errors and try default format list.
+    }
+
+    if (!formats.length) return null;
+
+    try {
+      return new Detector({ formats });
+    } catch {
+      return null;
+    }
   };
 
   const normalizeCameraZoom = () => {
@@ -124,69 +162,123 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     audio: false
   });
 
-  const startScanner = async (devList, idx) => {
-    if (!videoRef.current) return;
-    try {
-      const reader = buildReader();
-      readerRef.current = reader;
-      const chosenDevice = idx >= 0 ? devList?.[idx] : null;
-      const deviceId = chosenDevice?.deviceId || null;
-      setScanning(true);
-      setError(null);
-      const onDecode = (result, err) => {
-        if (result) {
-          const value = result.getText()?.trim();
+  const startRefocusLoop = () => {
+    if (refocusIntervalRef.current) clearInterval(refocusIntervalRef.current);
+    refocusIntervalRef.current = setInterval(() => {
+      triggerRefocus();
+    }, 1800);
+  };
+
+  const startNativeScanner = async (devList, idx) => {
+    if (!videoRef.current) return false;
+    const detector = nativeDetectorRef.current || await createNativeDetector();
+    if (!detector) return false;
+    nativeDetectorRef.current = detector;
+
+    const chosenDevice = idx >= 0 ? devList?.[idx] : null;
+    const deviceId = chosenDevice?.deviceId || null;
+    const stream = await navigator.mediaDevices.getUserMedia(getVideoConstraints(deviceId));
+
+    videoRef.current.srcObject = stream;
+    await videoRef.current.play().catch(() => {});
+
+    setScanning(true);
+    setError(null);
+    nativeScanLastTsRef.current = 0;
+    nativeDetectBusyRef.current = false;
+
+    setTimeout(normalizeCameraZoom, 300);
+    setTimeout(normalizeCameraZoom, 1000);
+    setTimeout(triggerRefocus, 450);
+    startRefocusLoop();
+
+    const scanLoop = async (ts) => {
+      nativeScanRafRef.current = requestAnimationFrame(scanLoop);
+
+      if (!videoRef.current || videoRef.current.readyState < 2) return;
+      if (ts - nativeScanLastTsRef.current < 120) return;
+      if (nativeDetectBusyRef.current) return;
+
+      nativeScanLastTsRef.current = ts;
+      nativeDetectBusyRef.current = true;
+
+      try {
+        const results = await detector.detect(videoRef.current);
+        if (Array.isArray(results) && results.length > 0) {
+          const value = (results[0].rawValue || '').trim();
           if (value) {
             markDetected(value);
             onScan(value);
           }
         }
-        if (err && !(err instanceof NotFoundException)) {
-          // Ignore continuous decode noise errors. NotFound is expected.
-        }
-      };
-
-      let decodePromise;
-      try {
-        decodePromise = reader.decodeFromConstraints(getVideoConstraints(deviceId), videoRef.current, onDecode);
       } catch {
-        // Some browsers are strict with custom constraints; fallback to standard device decode.
-        decodePromise = reader.decodeFromVideoDevice(deviceId, videoRef.current, onDecode);
+        // Keep loop alive; detection can fail on some frames.
+      } finally {
+        nativeDetectBusyRef.current = false;
       }
-      setTimeout(normalizeCameraZoom, 350);
-      setTimeout(normalizeCameraZoom, 1200);
-      setTimeout(triggerRefocus, 450);
-      if (refocusIntervalRef.current) clearInterval(refocusIntervalRef.current);
-      // Keep nudging focus while scanning on phones that support it.
-      refocusIntervalRef.current = setInterval(() => {
-        triggerRefocus();
-      }, 1800);
-      await decodePromise;
-    } catch (e) {
+    };
+
+    nativeScanRafRef.current = requestAnimationFrame(scanLoop);
+    return true;
+  };
+
+  const startZxingScanner = async (devList, idx) => {
+    if (!videoRef.current) return;
+
+    const reader = buildReader();
+    readerRef.current = reader;
+    const chosenDevice = idx >= 0 ? devList?.[idx] : null;
+    const deviceId = chosenDevice?.deviceId || null;
+
+    setScanning(true);
+    setError(null);
+
+    const onDecode = (result, err) => {
+      if (result) {
+        const value = result.getText()?.trim();
+        if (value) {
+          markDetected(value);
+          onScan(value);
+        }
+      }
+      if (err && !(err instanceof NotFoundException)) {
+        // Ignore continuous decode noise errors. NotFound is expected.
+      }
+    };
+
+    let decodePromise;
+    try {
+      decodePromise = reader.decodeFromConstraints(getVideoConstraints(deviceId), videoRef.current, onDecode);
+    } catch {
+      // Some browsers are strict with custom constraints; fallback to standard device decode.
+      decodePromise = reader.decodeFromVideoDevice(deviceId, videoRef.current, onDecode);
+    }
+
+    setTimeout(normalizeCameraZoom, 350);
+    setTimeout(normalizeCameraZoom, 1200);
+    setTimeout(triggerRefocus, 450);
+    startRefocusLoop();
+    await decodePromise;
+  };
+
+  const startScanner = async (devList, idx) => {
+    if (!videoRef.current) return;
+
+    try {
+      const nativeStarted = await startNativeScanner(devList, idx);
+      if (nativeStarted) return;
+    } catch {
+      // Fallback to ZXing below.
+    }
+
+    try {
+      await startZxingScanner(devList, idx);
+    } catch (zxingErr) {
       try {
-        // Final fallback for problematic devices: let browser pick any camera.
-        const fallbackReader = buildReader();
-        readerRef.current = fallbackReader;
-        await fallbackReader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
-          if (result) {
-            const value = result.getText()?.trim();
-            if (value) {
-              markDetected(value);
-              onScan(value);
-            }
-          }
-          if (err && !(err instanceof NotFoundException)) {
-            // Ignore expected scan-loop errors.
-          }
-        });
-        setTimeout(normalizeCameraZoom, 350);
-        setTimeout(triggerRefocus, 450);
-        if (refocusIntervalRef.current) clearInterval(refocusIntervalRef.current);
-        refocusIntervalRef.current = setInterval(() => {
-          triggerRefocus();
-        }, 1800);
+        // Final fallback: let browser pick any camera.
+        await startZxingScanner([], -1);
       } catch (fallbackErr) {
-        setError(fallbackErr.message || e.message || 'Camera access denied');
+        setError(fallbackErr.message || zxingErr.message || 'Camera access denied');
         setScanning(false);
       }
     }
@@ -194,6 +286,10 @@ const BarcodeScanner = ({ onScan, active = true }) => {
 
   const stopScanner = () => {
     readerRef.current?.reset();
+    if (nativeScanRafRef.current) {
+      cancelAnimationFrame(nativeScanRafRef.current);
+      nativeScanRafRef.current = null;
+    }
     if (refocusIntervalRef.current) {
       clearInterval(refocusIntervalRef.current);
       refocusIntervalRef.current = null;
