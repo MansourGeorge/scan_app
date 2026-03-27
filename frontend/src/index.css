@@ -310,6 +310,21 @@ html, body, #root {
   backdrop-filter: blur(8px);
 }
 
+.camera-focus-hint {
+  position: absolute;
+  top: 2.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text2);
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  backdrop-filter: blur(8px);
+}
+
 .camera-placeholder {
   position: absolute;
   inset: 0;

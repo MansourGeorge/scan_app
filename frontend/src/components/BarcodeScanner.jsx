@@ -5,6 +5,7 @@ import { Camera, CameraOff, RefreshCw } from 'lucide-react';
 const BarcodeScanner = ({ onScan, active = true }) => {
   const videoRef = useRef(null);
   const readerRef = useRef(null);
+  const refocusIntervalRef = useRef(null);
   const [error, setError] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState([]);
@@ -82,6 +83,34 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     }
   };
 
+  const triggerRefocus = async () => {
+    try {
+      const stream = videoRef.current?.srcObject;
+      const track = stream?.getVideoTracks?.()[0];
+      if (!track || typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') return;
+
+      const caps = track.getCapabilities();
+      const advanced = [];
+
+      if (Array.isArray(caps.focusMode)) {
+        if (caps.focusMode.includes('continuous')) advanced.push({ focusMode: 'continuous' });
+        else if (caps.focusMode.includes('single-shot')) advanced.push({ focusMode: 'single-shot' });
+        else if (caps.focusMode.includes('auto')) advanced.push({ focusMode: 'auto' });
+      }
+
+      if (caps.focusDistance && typeof caps.focusDistance.min === 'number' && typeof caps.focusDistance.max === 'number') {
+        const target = (caps.focusDistance.min + caps.focusDistance.max) / 2;
+        advanced.push({ focusDistance: target });
+      }
+
+      if (advanced.length) {
+        await track.applyConstraints({ advanced });
+      }
+    } catch {
+      // Ignore unsupported focus controls.
+    }
+  };
+
   const getVideoConstraints = (deviceId) => ({
     video: {
       ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
@@ -126,6 +155,12 @@ const BarcodeScanner = ({ onScan, active = true }) => {
       }
       setTimeout(normalizeCameraZoom, 350);
       setTimeout(normalizeCameraZoom, 1200);
+      setTimeout(triggerRefocus, 450);
+      if (refocusIntervalRef.current) clearInterval(refocusIntervalRef.current);
+      // Keep nudging focus while scanning on phones that support it.
+      refocusIntervalRef.current = setInterval(() => {
+        triggerRefocus();
+      }, 1800);
       await decodePromise;
     } catch (e) {
       try {
@@ -145,6 +180,11 @@ const BarcodeScanner = ({ onScan, active = true }) => {
           }
         });
         setTimeout(normalizeCameraZoom, 350);
+        setTimeout(triggerRefocus, 450);
+        if (refocusIntervalRef.current) clearInterval(refocusIntervalRef.current);
+        refocusIntervalRef.current = setInterval(() => {
+          triggerRefocus();
+        }, 1800);
       } catch (fallbackErr) {
         setError(fallbackErr.message || e.message || 'Camera access denied');
         setScanning(false);
@@ -154,6 +194,10 @@ const BarcodeScanner = ({ onScan, active = true }) => {
 
   const stopScanner = () => {
     readerRef.current?.reset();
+    if (refocusIntervalRef.current) {
+      clearInterval(refocusIntervalRef.current);
+      refocusIntervalRef.current = null;
+    }
     if (detectionResetTimerRef.current) {
       clearTimeout(detectionResetTimerRef.current);
       detectionResetTimerRef.current = null;
@@ -215,7 +259,7 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   };
 
   return (
-    <div className="camera-wrapper">
+    <div className="camera-wrapper" onClick={() => triggerRefocus()}>
       <video ref={videoRef} muted playsInline autoPlay style={{ display: scanning ? 'block' : 'none' }} />
       {!scanning && !error && (
         <div className="camera-placeholder">
@@ -245,6 +289,7 @@ const BarcodeScanner = ({ onScan, active = true }) => {
           {isInAppBrowser && (
             <div className="camera-hint">If camera stays blurry, open this link in Safari/Chrome</div>
           )}
+          <div className="camera-focus-hint">Tap preview to refocus</div>
           {detectedCode && (
             <div className="camera-detected">Detected: {detectedCode}</div>
           )}
