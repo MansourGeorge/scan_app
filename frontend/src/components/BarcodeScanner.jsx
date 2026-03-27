@@ -9,6 +9,8 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState([]);
   const [deviceIdx, setDeviceIdx] = useState(-1);
+  const [detectedCode, setDetectedCode] = useState('');
+  const detectionResetTimerRef = useRef(null);
 
   const buildReader = () => {
     const hints = new Map();
@@ -32,6 +34,15 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     if (!devList?.length) return -1;
     const preferred = devList.findIndex((d) => /back|rear|environment/i.test(d.label || ''));
     return preferred >= 0 ? preferred : -1;
+  };
+
+  const markDetected = (value) => {
+    setDetectedCode(value);
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(35);
+    }
+    if (detectionResetTimerRef.current) clearTimeout(detectionResetTimerRef.current);
+    detectionResetTimerRef.current = setTimeout(() => setDetectedCode(''), 1400);
   };
 
   const normalizeCameraZoom = () => {
@@ -62,6 +73,16 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     }
   };
 
+  const getVideoConstraints = (deviceId) => ({
+    video: {
+      ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 30, max: 60 }
+    },
+    audio: false
+  });
+
   const startScanner = async (devList, idx) => {
     if (!videoRef.current) return;
     try {
@@ -71,25 +92,61 @@ const BarcodeScanner = ({ onScan, active = true }) => {
       const deviceId = chosenDevice?.deviceId || null;
       setScanning(true);
       setError(null);
-      const decodePromise = reader.decodeFromVideoDevice(deviceId, videoRef.current, (result, err) => {
+      const onDecode = (result, err) => {
         if (result) {
-          onScan(result.getText()?.trim());
+          const value = result.getText()?.trim();
+          if (value) {
+            markDetected(value);
+            onScan(value);
+          }
         }
         if (err && !(err instanceof NotFoundException)) {
           // Ignore continuous decode noise errors. NotFound is expected.
         }
-      });
+      };
+
+      let decodePromise;
+      try {
+        decodePromise = reader.decodeFromConstraints(getVideoConstraints(deviceId), videoRef.current, onDecode);
+      } catch {
+        // Some browsers are strict with custom constraints; fallback to standard device decode.
+        decodePromise = reader.decodeFromVideoDevice(deviceId, videoRef.current, onDecode);
+      }
       setTimeout(normalizeCameraZoom, 350);
       setTimeout(normalizeCameraZoom, 1200);
       await decodePromise;
     } catch (e) {
-      setError(e.message || 'Camera access denied');
-      setScanning(false);
+      try {
+        // Final fallback for problematic devices: let browser pick any camera.
+        const fallbackReader = buildReader();
+        readerRef.current = fallbackReader;
+        await fallbackReader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
+          if (result) {
+            const value = result.getText()?.trim();
+            if (value) {
+              markDetected(value);
+              onScan(value);
+            }
+          }
+          if (err && !(err instanceof NotFoundException)) {
+            // Ignore expected scan-loop errors.
+          }
+        });
+        setTimeout(normalizeCameraZoom, 350);
+      } catch (fallbackErr) {
+        setError(fallbackErr.message || e.message || 'Camera access denied');
+        setScanning(false);
+      }
     }
   };
 
   const stopScanner = () => {
     readerRef.current?.reset();
+    if (detectionResetTimerRef.current) {
+      clearTimeout(detectionResetTimerRef.current);
+      detectionResetTimerRef.current = null;
+    }
+    setDetectedCode('');
     if (videoRef.current?.srcObject) {
       const stream = videoRef.current.srcObject;
       stream.getTracks().forEach((track) => track.stop());
@@ -168,6 +225,9 @@ const BarcodeScanner = ({ onScan, active = true }) => {
             </div>
           </div>
           <div className="camera-status">Point at barcode to scan</div>
+          {detectedCode && (
+            <div className="camera-detected">Detected: {detectedCode}</div>
+          )}
         </>
       )}
       {scanning && devices.length > 1 && (
