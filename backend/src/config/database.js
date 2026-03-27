@@ -2,16 +2,41 @@ const mysql = require('mysql2/promise');
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || 'MySQLR00tP@ssw0rd',
-  database: process.env.DB_NAME || 'barcode_scanner',
+const toBool = (value) => {
+  if (!value) return false;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+};
+
+const connectionUri =
+  process.env.DB_URL ||
+  process.env.DATABASE_URL ||
+  process.env.MYSQL_URL ||
+  process.env.MYSQL_PUBLIC_URL;
+
+const basePoolConfig = {
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
   timezone: '+00:00'
-});
+};
+
+if (toBool(process.env.DB_SSL)) {
+  basePoolConfig.ssl = { rejectUnauthorized: false };
+}
+
+const pool = connectionUri
+  ? mysql.createPool({
+      uri: connectionUri,
+      ...basePoolConfig
+    })
+  : mysql.createPool({
+      host: process.env.DB_HOST || process.env.MYSQLHOST || 'localhost',
+      port: Number(process.env.DB_PORT || process.env.MYSQLPORT || 3306),
+      user: process.env.DB_USER || process.env.MYSQLUSER || 'root',
+      password: process.env.DB_PASSWORD || process.env.MYSQLPASSWORD || '',
+      database: process.env.DB_NAME || process.env.MYSQLDATABASE || 'barcode_scanner',
+      ...basePoolConfig
+    });
 
 const initDB = async () => {
   const conn = await pool.getConnection();

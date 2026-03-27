@@ -1,8 +1,12 @@
-CREATE DATABASE IF NOT EXISTS barcode_scanner
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
-USE barcode_scanner;
+-- For Railway:
+-- 1) Open the schema shown in MYSQLDATABASE.
+-- 2) Run this script in that schema.
+--
+-- Optional local setup:
+-- CREATE DATABASE IF NOT EXISTS barcode_scanner
+--   CHARACTER SET utf8mb4
+--   COLLATE utf8mb4_unicode_ci;
+-- USE barcode_scanner;
 
 CREATE TABLE IF NOT EXISTS products (
   id            INT            AUTO_INCREMENT PRIMARY KEY,
