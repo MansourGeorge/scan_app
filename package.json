@@ -1,0 +1,16 @@
+{
+  "name": "scanpro-app",
+  "private": true,
+  "scripts": {
+    "install-all": "npm install && npm install --prefix backend && npm install --prefix frontend",
+    "setup": "npm run install-all",
+    "dev": "concurrently -k -n backend,frontend -c cyan,magenta \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "start": "npm --prefix backend start",
+    "build": "npm --prefix frontend run build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
