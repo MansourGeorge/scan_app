@@ -183,7 +183,7 @@ const AdminDashboard = () => {
     const timer = setTimeout(() => {
       lastScan.current = '';
       lookupBarcode(barcode);
-    }, 2000);
+    }, 250);
     return () => clearTimeout(timer);
   }, [manualBarcode, lookupBarcode]);
 
@@ -259,7 +259,7 @@ const AdminDashboard = () => {
           <input
             type="text"
             className="input"
-            placeholder="Enter barcode (auto search in 2s)..."
+            placeholder="Enter barcode (auto search)..."
             value={manualBarcode}
             onChange={e => setManualBarcode(e.target.value)}
           />
