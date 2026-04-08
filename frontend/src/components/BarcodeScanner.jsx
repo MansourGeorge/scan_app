@@ -13,6 +13,9 @@ const NATIVE_BARCODE_FORMATS = [
   'codabar'
 ];
 
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const MAX_NATIVE_DETECT_ERRORS = 10;
+
 const BarcodeScanner = ({ onScan, active = true }) => {
   const videoRef = useRef(null);
   const readerRef = useRef(null);
@@ -21,14 +24,21 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   const nativeScanRafRef = useRef(null);
   const nativeScanLastTsRef = useRef(0);
   const nativeDetectBusyRef = useRef(false);
+  const nativeErrorCountRef = useRef(0);
+  const nativeFallbackTriggeredRef = useRef(false);
+  const disableNativeDetectorRef = useRef(false);
+  const detectionResetTimerRef = useRef(null);
+  const startAttemptRef = useRef(0);
+  const isIOSRef = useRef(false);
+  const isInAppBrowserRef = useRef(false);
+
   const [error, setError] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState([]);
   const [deviceIdx, setDeviceIdx] = useState(-1);
   const [detectedCode, setDetectedCode] = useState('');
   const [isInAppBrowser, setIsInAppBrowser] = useState(false);
-  const detectionResetTimerRef = useRef(null);
-  const isIOSRef = useRef(false);
+  const [manualStartRequired, setManualStartRequired] = useState(false);
 
   const buildReader = () => {
     const hints = new Map();
@@ -48,6 +58,18 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     return reader;
   };
 
+  const supportsCameraApis = () => (
+    typeof navigator !== 'undefined' &&
+    !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === 'function'
+  );
+
+  const hasSecureCameraContext = () => {
+    if (typeof window === 'undefined') return true;
+    if (window.isSecureContext) return true;
+    return LOCAL_HOSTS.has(window.location.hostname);
+  };
+
   const getPreferredDeviceIndex = (devList) => {
     if (!devList?.length) return -1;
     const labels = devList.map((d) => (d.label || '').toLowerCase());
@@ -60,6 +82,133 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     if (preferred >= 0) return preferred;
 
     return -1;
+  };
+
+  const getCameraErrorMessage = (err) => {
+    const errorName = err?.name || '';
+    const errorMessage = String(err?.message || '').toLowerCase();
+
+    if (!hasSecureCameraContext() || errorMessage.includes('secure') || errorMessage.includes('https')) {
+      return 'Camera requires HTTPS (or localhost). Open this page using https://';
+    }
+    if (isInAppBrowserRef.current) {
+      return 'Camera support is limited in this in-app browser. Open the page in Safari/Chrome.';
+    }
+    if (/NotAllowedError|SecurityError/i.test(errorName)) {
+      return 'Camera permission denied. Allow camera access, then try again.';
+    }
+    if (/NotFoundError|DevicesNotFoundError/i.test(errorName)) {
+      return 'No camera was found on this device.';
+    }
+    if (/NotReadableError|TrackStartError|AbortError/i.test(errorName)) {
+      return 'Camera is currently busy in another app. Close other apps and retry.';
+    }
+    if (/OverconstrainedError|ConstraintNotSatisfiedError/i.test(errorName)) {
+      return 'Camera mode not supported on this device. Try again to use fallback mode.';
+    }
+    return err?.message || 'Unable to access camera on this device.';
+  };
+
+  const listVideoInputDevices = async () => {
+    if (!supportsCameraApis() || typeof navigator.mediaDevices.enumerateDevices !== 'function') {
+      return [];
+    }
+
+    try {
+      const allDevices = await navigator.mediaDevices.enumerateDevices();
+      return allDevices
+        .filter((device) => device.kind === 'videoinput' || device.kind === 'video')
+        .map((device) => ({
+          deviceId: device.deviceId,
+          label: device.label || '',
+          kind: 'videoinput',
+          groupId: device.groupId || ''
+        }));
+    } catch {
+      return [];
+    }
+  };
+
+  const updateDeviceList = async () => {
+    const nextDevices = await listVideoInputDevices();
+    setDevices(nextDevices);
+    return nextDevices;
+  };
+
+  const getVideoConstraintCandidates = (deviceId) => {
+    const selectors = deviceId
+      ? [{ deviceId: { exact: deviceId } }, { deviceId: { ideal: deviceId } }]
+      : [{ facingMode: { ideal: 'environment' } }, { facingMode: 'environment' }, {}];
+
+    const resolutionPresets = [
+      { width: { ideal: isIOSRef.current ? 1920 : 1280 }, height: { ideal: isIOSRef.current ? 1080 : 720 } },
+      { width: { ideal: 1280 }, height: { ideal: 720 } },
+      {}
+    ];
+    const fpsPresets = isIOSRef.current ? [{}] : [{ frameRate: { ideal: 24, max: 30 } }, {}];
+
+    const candidates = [];
+    const seen = new Set();
+
+    selectors.forEach((selector) => {
+      resolutionPresets.forEach((resolution) => {
+        fpsPresets.forEach((fps) => {
+          const candidate = { ...selector, ...resolution, ...fps };
+          const key = JSON.stringify(candidate);
+          if (!seen.has(key)) {
+            seen.add(key);
+            candidates.push(candidate);
+          }
+        });
+      });
+    });
+
+    return candidates;
+  };
+
+  const acquireCameraStream = async (deviceId, allowGenericFallback = true) => {
+    let lastError = null;
+    const candidates = getVideoConstraintCandidates(deviceId);
+
+    for (const video of candidates) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({ video, audio: false });
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (allowGenericFallback && deviceId) {
+      return acquireCameraStream(null, false);
+    }
+
+    throw lastError || new Error('Camera access failed');
+  };
+
+  const attachStreamToVideo = async (stream, attemptId) => {
+    const videoElement = videoRef.current;
+    if (!videoElement || attemptId !== startAttemptRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
+
+    videoElement.setAttribute('playsinline', 'true');
+    videoElement.muted = true;
+    videoElement.autoplay = true;
+    videoElement.srcObject = stream;
+
+    try {
+      await videoElement.play();
+    } catch {
+      // Some browsers delay playback until gesture; keep stream attached.
+    }
+
+    if (attemptId !== startAttemptRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return false;
+    }
+
+    return true;
   };
 
   const markDetected = (value) => {
@@ -157,21 +306,6 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     }
   };
 
-  const getVideoConstraints = (deviceId) => {
-    const video = {
-      ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' } }),
-      width: { ideal: isIOSRef.current ? 1920 : 1280 },
-      height: { ideal: isIOSRef.current ? 1080 : 720 },
-      frameRate: { ideal: 24, max: 30 }
-    };
-
-    if (!isIOSRef.current) {
-      video.advanced = [{ focusMode: 'continuous' }];
-    }
-
-    return { video, audio: false };
-  };
-
   const startRefocusLoop = () => {
     if (refocusIntervalRef.current) clearInterval(refocusIntervalRef.current);
     refocusIntervalRef.current = setInterval(() => {
@@ -179,7 +313,13 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     }, 1800);
   };
 
-  const startNativeScanner = async (devList, idx) => {
+  const shouldTryNativeDetector = () => (
+    !disableNativeDetectorRef.current &&
+    !isIOSRef.current &&
+    !isInAppBrowserRef.current
+  );
+
+  const startNativeScanner = async (devList, idx, attemptId) => {
     if (!videoRef.current) return false;
     const detector = nativeDetectorRef.current || await createNativeDetector();
     if (!detector) return false;
@@ -187,22 +327,27 @@ const BarcodeScanner = ({ onScan, active = true }) => {
 
     const chosenDevice = idx >= 0 ? devList?.[idx] : null;
     const deviceId = chosenDevice?.deviceId || null;
-    const stream = await navigator.mediaDevices.getUserMedia(getVideoConstraints(deviceId));
-
-    videoRef.current.srcObject = stream;
-    await videoRef.current.play().catch(() => {});
+    const stream = await acquireCameraStream(deviceId);
+    const attached = await attachStreamToVideo(stream, attemptId);
+    if (!attached) return false;
+    if (attemptId !== startAttemptRef.current) return false;
 
     setScanning(true);
     setError(null);
+    setManualStartRequired(false);
     nativeScanLastTsRef.current = 0;
     nativeDetectBusyRef.current = false;
+    nativeErrorCountRef.current = 0;
+    nativeFallbackTriggeredRef.current = false;
 
     setTimeout(normalizeCameraZoom, 300);
     setTimeout(normalizeCameraZoom, 1000);
     setTimeout(triggerRefocus, 450);
     startRefocusLoop();
+    updateDeviceList();
 
     const scanLoop = async (ts) => {
+      if (attemptId !== startAttemptRef.current) return;
       nativeScanRafRef.current = requestAnimationFrame(scanLoop);
 
       if (!videoRef.current || videoRef.current.readyState < 2) return;
@@ -217,12 +362,42 @@ const BarcodeScanner = ({ onScan, active = true }) => {
         if (Array.isArray(results) && results.length > 0) {
           const value = (results[0].rawValue || '').trim();
           if (value) {
+            nativeErrorCountRef.current = 0;
             markDetected(value);
             onScan(value);
           }
         }
       } catch {
-        // Keep loop alive; detection can fail on some frames.
+        nativeErrorCountRef.current += 1;
+
+        if (
+          nativeErrorCountRef.current >= MAX_NATIVE_DETECT_ERRORS &&
+          !nativeFallbackTriggeredRef.current &&
+          attemptId === startAttemptRef.current
+        ) {
+          nativeFallbackTriggeredRef.current = true;
+          disableNativeDetectorRef.current = true;
+          nativeDetectorRef.current = null;
+
+          if (nativeScanRafRef.current) {
+            cancelAnimationFrame(nativeScanRafRef.current);
+            nativeScanRafRef.current = null;
+          }
+
+          if (videoRef.current?.srcObject) {
+            const nativeStream = videoRef.current.srcObject;
+            nativeStream.getTracks().forEach((track) => track.stop());
+            videoRef.current.srcObject = null;
+          }
+
+          setScanning(false);
+          startZxingScanner(devList, idx, attemptId).catch((fallbackErr) => {
+            if (attemptId !== startAttemptRef.current) return;
+            setError(getCameraErrorMessage(fallbackErr));
+            setScanning(false);
+          });
+          return;
+        }
       } finally {
         nativeDetectBusyRef.current = false;
       }
@@ -232,16 +407,22 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     return true;
   };
 
-  const startZxingScanner = async (devList, idx) => {
+  const startZxingScanner = async (devList, idx, attemptId) => {
     if (!videoRef.current) return;
 
     const reader = buildReader();
     readerRef.current = reader;
     const chosenDevice = idx >= 0 ? devList?.[idx] : null;
     const deviceId = chosenDevice?.deviceId || null;
+    const stream = await acquireCameraStream(deviceId);
+    const attached = await attachStreamToVideo(stream, attemptId);
+    if (!attached) return;
+    if (attemptId !== startAttemptRef.current) return;
 
     setScanning(true);
     setError(null);
+    setManualStartRequired(false);
+    updateDeviceList();
 
     const onDecode = (result, err) => {
       if (result) {
@@ -256,46 +437,21 @@ const BarcodeScanner = ({ onScan, active = true }) => {
       }
     };
 
-    let decodePromise;
-    try {
-      decodePromise = reader.decodeFromConstraints(getVideoConstraints(deviceId), videoRef.current, onDecode);
-    } catch {
-      // Some browsers are strict with custom constraints; fallback to standard device decode.
-      decodePromise = reader.decodeFromVideoDevice(deviceId, videoRef.current, onDecode);
-    }
-
     setTimeout(normalizeCameraZoom, 350);
     setTimeout(normalizeCameraZoom, 1200);
     setTimeout(triggerRefocus, 450);
     startRefocusLoop();
-    await decodePromise;
+    await reader.decodeFromStream(stream, videoRef.current, onDecode);
   };
 
-  const startScanner = async (devList, idx) => {
-    if (!videoRef.current) return;
-
-    try {
-      const nativeStarted = await startNativeScanner(devList, idx);
-      if (nativeStarted) return;
-    } catch {
-      // Fallback to ZXing below.
+  const stopScanner = (invalidateStart = true) => {
+    if (invalidateStart) {
+      startAttemptRef.current += 1;
     }
-
-    try {
-      await startZxingScanner(devList, idx);
-    } catch (zxingErr) {
-      try {
-        // Final fallback: let browser pick any camera.
-        await startZxingScanner([], -1);
-      } catch (fallbackErr) {
-        setError(fallbackErr.message || zxingErr.message || 'Camera access denied');
-        setScanning(false);
-      }
-    }
-  };
-
-  const stopScanner = () => {
     readerRef.current?.reset();
+    readerRef.current = null;
+    nativeErrorCountRef.current = 0;
+    nativeFallbackTriggeredRef.current = false;
     if (nativeScanRafRef.current) {
       cancelAnimationFrame(nativeScanRafRef.current);
       nativeScanRafRef.current = null;
@@ -317,9 +473,86 @@ const BarcodeScanner = ({ onScan, active = true }) => {
     setScanning(false);
   };
 
+  const startScanner = async (devList = [], idx = -1) => {
+    if (!videoRef.current) return;
+    if (!supportsCameraApis()) {
+      setError('This browser does not support camera access.');
+      setScanning(false);
+      return;
+    }
+    if (!hasSecureCameraContext()) {
+      setError('Camera requires HTTPS (or localhost). Open this page using https://');
+      setScanning(false);
+      return;
+    }
+
+    stopScanner(false);
+    const attemptId = ++startAttemptRef.current;
+
+    try {
+      if (shouldTryNativeDetector()) {
+        try {
+          const nativeStarted = await startNativeScanner(devList, idx, attemptId);
+          if (nativeStarted) return;
+        } catch {
+          // Fallback to ZXing scanner below.
+        }
+      }
+
+      await startZxingScanner(devList, idx, attemptId);
+    } catch (err) {
+      if (attemptId !== startAttemptRef.current) return;
+      setError(getCameraErrorMessage(err));
+      setScanning(false);
+    }
+  };
+
+  const initializeAndStartScanner = async () => {
+    if (!active) return;
+    if (!supportsCameraApis()) {
+      setError('This browser does not support camera access.');
+      return;
+    }
+    if (!hasSecureCameraContext()) {
+      setError('Camera requires HTTPS (or localhost). Open this page using https://');
+      return;
+    }
+
+    const devs = await updateDeviceList();
+    const preferredIdx = getPreferredDeviceIndex(devs);
+    setDeviceIdx(preferredIdx);
+    await startScanner(devs, preferredIdx);
+  };
+
+  const handleManualStart = (event) => {
+    event.stopPropagation();
+    setManualStartRequired(false);
+    initializeAndStartScanner();
+  };
+
+  const handleRetry = (event) => {
+    event.stopPropagation();
+    setError(null);
+    setManualStartRequired(false);
+    const preferredIdx = deviceIdx >= 0 ? deviceIdx : -1;
+    startScanner(devices, preferredIdx);
+  };
+
+  const switchCamera = (event) => {
+    event.stopPropagation();
+    if (!devices.length) return;
+    const current = deviceIdx >= 0 ? deviceIdx : 0;
+    const next = (current + 1) % devices.length;
+    setDeviceIdx(next);
+    setManualStartRequired(false);
+    startScanner(devices, next);
+  };
+
   useEffect(() => {
     const ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '') || '';
-    setIsInAppBrowser(/WhatsApp|FBAN|FBAV|Instagram/i.test(ua));
+    const inApp = /WhatsApp|FBAN|FBAV|Instagram/i.test(ua);
+    setIsInAppBrowser(inApp);
+    isInAppBrowserRef.current = inApp;
     isIOSRef.current = /iPad|iPhone|iPod/.test(ua) || (
       typeof navigator !== 'undefined' &&
       navigator.platform === 'MacIntel' &&
@@ -328,46 +561,26 @@ const BarcodeScanner = ({ onScan, active = true }) => {
   }, []);
 
   useEffect(() => {
-    if (!active) { stopScanner(); return; }
+    if (!active) {
+      setManualStartRequired(false);
+      stopScanner();
+      return;
+    }
 
-    let cancelled = false;
-    const deviceReader = buildReader();
+    // iOS and in-app browsers are more reliable when start is triggered by a user gesture.
+    if (isIOSRef.current || isInAppBrowserRef.current) {
+      setManualStartRequired(true);
+      setError(null);
+      stopScanner(false);
+      return () => stopScanner();
+    }
 
-    const initScanner = async () => {
-      try {
-        const devs = await deviceReader.listVideoInputDevices();
-        if (cancelled) return;
-        setDevices(devs);
-        const preferredIdx = getPreferredDeviceIndex(devs);
-        setDeviceIdx(preferredIdx);
-        await startScanner(devs, preferredIdx);
-      } catch {
-        if (cancelled) return;
-        // Fallback to generic camera request.
-        try {
-          await startScanner([], -1);
-        } catch (err) {
-          setError(err?.message || 'Camera access denied');
-        }
-      }
-    };
-
-    initScanner();
+    initializeAndStartScanner();
 
     return () => {
-      cancelled = true;
       stopScanner();
     };
-  }, [active]);
-
-  const switchCamera = () => {
-    if (!devices.length) return;
-    const current = deviceIdx >= 0 ? deviceIdx : 0;
-    const next = (current + 1) % devices.length;
-    setDeviceIdx(next);
-    stopScanner();
-    setTimeout(() => startScanner(devices, next), 250);
-  };
+  }, [active, isInAppBrowser]);
 
   return (
     <div className="camera-wrapper" onClick={() => triggerRefocus()}>
@@ -375,15 +588,22 @@ const BarcodeScanner = ({ onScan, active = true }) => {
       {!scanning && !error && (
         <div className="camera-placeholder">
           <Camera size={36} />
-          <span style={{ fontSize: '0.875rem' }}>Initializing camera...</span>
+          <span style={{ fontSize: '0.875rem' }}>
+            {manualStartRequired ? 'Tap start to enable camera' : 'Initializing camera...'}
+          </span>
+          {manualStartRequired && (
+            <button className="btn btn-secondary btn-sm" onClick={handleManualStart}>
+              <Camera size={14} /> Start Camera
+            </button>
+          )}
         </div>
       )}
       {error && (
         <div className="camera-placeholder">
           <CameraOff size={36} color="var(--accent3)" />
           <span style={{ fontSize: '0.8125rem', color: 'var(--accent3)', textAlign: 'center', maxWidth: '240px' }}>{error}</span>
-          <button className="btn btn-secondary btn-sm" onClick={() => startScanner(devices, deviceIdx)}>
-            <RefreshCw size={14} /> Retry
+          <button className="btn btn-secondary btn-sm" onClick={handleRetry}>
+            <RefreshCw size={14} /> {isIOSRef.current ? 'Tap to Start Camera' : 'Retry'}
           </button>
         </div>
       )}
